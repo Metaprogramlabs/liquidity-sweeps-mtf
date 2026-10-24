@@ -1,0 +1,309 @@
+//@version=5
+// ══════════════════════════════════════════════════════════════════════════════
+//  Liquidity Sweeps MTF
+//
+//  Author   : Meta Program Labs
+//  GitHub   : https://github.com/Metaprogramlabs
+//  Telegram : https://t.me/Metaprogramlabs
+//
+//  © 2026 Meta Program Labs. All rights reserved.
+//
+//  The source code is published for viewing and for personal, non-commercial
+//  use on your own TradingView account only. Copying, modification,
+//  redistribution, republishing (including on TradingView or any other
+//  platform) and commercial use are prohibited without prior written
+//  permission of the author. See the LICENSE file in the repository.
+// ══════════════════════════════════════════════════════════════════════════════
+
+indicator('Liquidity Sweeps MTF ', 'Sweeps MTF', true, max_lines_count=500, max_labels_count=500)
+//---------------------------------------------------------------------------------------------------------------------
+// Settings
+//---------------------------------------------------------------------------------------------------------------------{
+invMode    = input.string('Close', 'Invalidate sweep by', options = ['Close', 'Body'], group = 'General',
+     tooltip = 'Close: sweep is removed if a candle CLOSES beyond the swing level.\nBody: removed if the candle BODY (open or close) goes beyond the level.')
+maxAge     = input.int(5000, 'Max level age (bars)', minval = 100, group = 'General')
+labelTxt   = input.string('Sweep', 'Label text', group = 'General')
+mergeTicks = input.float(1.0, 'Merge levels within (ticks)', minval = 0.0, step = 1.0, group = 'General',
+     tooltip = 'Fractals of different timeframes (e.g. H1 and H4) whose price differs by no more than this many ticks are treated as ONE level: one line, one label with both timeframes (e.g. "Sweep H1+H4").')
+
+colBl      = input.color(#089981, 'Bullish sweep (low swept)', group = 'Style')
+colBr      = input.color(#f23645, 'Bearish sweep (high swept)', group = 'Style')
+
+//Liquidity 1
+show1   = input.bool(true, 'Show', group = 'Liquidity 1')
+mode1   = input.string('Select TF', 'Mode', options = ['Auto', 'Select TF', 'X+1 TF', 'X+2 TF', 'X+3 TF'], group = 'Liquidity 1')
+tf1     = input.timeframe('D', 'Timeframe (Select TF mode)', group = 'Liquidity 1')
+term1   = input.string('Intermediate Term', 'Detection', options = ['Short Term', 'Intermediate Term', 'Long Term'], group = 'Liquidity 1')
+sty1    = input.string('Solid', 'Line style', options = ['Solid', 'Dashed', 'Dotted'], group = 'Liquidity 1')
+
+//Liquidity 2
+show2   = input.bool(true, 'Show', group = 'Liquidity 2')
+mode2   = input.string('Select TF', 'Mode', options = ['Auto', 'Select TF', 'X+1 TF', 'X+2 TF', 'X+3 TF'], group = 'Liquidity 2')
+tf2     = input.timeframe('240', 'Timeframe (Select TF mode)', group = 'Liquidity 2')
+term2   = input.string('Intermediate Term', 'Detection', options = ['Short Term', 'Intermediate Term', 'Long Term'], group = 'Liquidity 2')
+sty2    = input.string('Dashed', 'Line style', options = ['Solid', 'Dashed', 'Dotted'], group = 'Liquidity 2')
+
+//---------------------------------------------------------------------------------------------------------------------}
+// User Defined Types
+//---------------------------------------------------------------------------------------------------------------------{
+type piv
+    float  prc
+    int    tim
+    int    bix
+    bool   mit
+    bool   wic
+    bool   s1      // level exists on timeframe of Liquidity 1
+    bool   s2      // level exists on timeframe of Liquidity 2
+    string sty     // line style
+    int    sSec    // seconds of the highest timeframe that owns this level (decides the style)
+    line   lin
+    label  lbl
+
+type swing
+    float y = na
+    int   x = na
+
+type vector
+    array<swing> v
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Functions / Methods
+//---------------------------------------------------------------------------------------------------------------------{
+method detect(array<vector> id, mode, depth)=>
+    var swing swingLevel = swing.new(na, na)
+    for i = 0 to depth-1
+        get_v = id.get(i).v
+
+        if get_v.size() == 3
+            pivot = switch mode
+                'bull' => math.max(get_v.get(0).y, get_v.get(1).y, get_v.get(2).y)
+                'bear' => math.min(get_v.get(0).y, get_v.get(1).y, get_v.get(2).y)
+
+            if pivot == get_v.get(1).y
+                if i < depth-1
+                    id.get(i+1).v.unshift(get_v.get(1))
+
+                    if id.get(i+1).v.size() > 3
+                        id.get(i+1).v.pop()
+                else
+                    swingLevel := swing.new(get_v.get(1).y, get_v.get(1).x)
+
+                get_v.pop()
+                get_v.pop()
+    swingLevel
+
+//Swing detection, executed inside request.security on the selected timeframe.
+//Returns ONE value (selected by "which") shifted by one bar -> only confirmed data is used, no repaint.
+//which: 0 = pivot high price, 1 = pivot high time, 2 = pivot low price, 3 = pivot low time
+//(time is returned as float - milliseconds fit into double exactly - and converted to int outside)
+f_swings(int depth, int which) =>
+    var fh = array.new<vector>(0)
+    var fl = array.new<vector>(0)
+
+    if fh.size() == 0
+        for i = 0 to depth-1
+            fh.push(vector.new(array.new<swing>(0)))
+            fl.push(vector.new(array.new<swing>(0)))
+
+    fh.get(0).v.unshift(swing.new(high, time))
+    fl.get(0).v.unshift(swing.new(low, time))
+
+    if fh.get(0).v.size() > 3
+        fh.get(0).v.pop()
+
+    if fl.get(0).v.size() > 3
+        fl.get(0).v.pop()
+
+    top = fh.detect('bull', depth)
+    btm = fl.detect('bear', depth)
+
+    float ph  = top.y
+    float phT = top.x
+    float pl  = btm.y
+    float plT = btm.x
+
+    //history references are computed on every bar, selection happens afterwards
+    float rPh  = ph[1]
+    float rPhT = phT[1]
+    float rPl  = pl[1]
+    float rPlT = plT[1]
+
+    which == 0 ? rPh : which == 1 ? rPhT : which == 2 ? rPl : rPlT
+
+f_depth(t) =>
+    t == 'Short Term' ? 1 : t == 'Intermediate Term' ? 2 : 3
+
+f_style(s) =>
+    s == 'Dashed' ? line.style_dashed : s == 'Dotted' ? line.style_dotted : line.style_solid
+
+//Human readable timeframe: 240 -> H4, D -> D, 15 -> 15m
+f_tfName(tf) =>
+    s = timeframe.in_seconds(tf)
+    string r = tf
+    if s >= 2592000
+        r := (s == 2592000 ? '' : str.tostring(math.round(s / 2592000))) + 'M'
+    else if s >= 604800
+        r := (s == 604800 ? '' : str.tostring(math.round(s / 604800))) + 'W'
+    else if s >= 86400
+        r := (s == 86400 ? '' : str.tostring(math.round(s / 86400))) + 'D'
+    else if s >= 3600 and s % 3600 == 0
+        r := 'H' + str.tostring(math.round(s / 3600))
+    else
+        r := str.tostring(math.round(s / 60)) + 'm'
+    r
+
+//Label text: base + timeframes that own the level (lower timeframe first), e.g. "Sweep H1+H4"
+f_lbl(string base, bool h1, bool h2, string n1, string n2, int sc1, int sc2) =>
+    string both = n1 == n2 ? n1 : (sc1 <= sc2 ? n1 + '+' + n2 : n2 + '+' + n1)
+    string nm   = h1 and h2 ? both : h1 ? n1 : n2
+    base + ' ' + nm
+
+//Adds a new swing level. If a level of the same side already exists at (almost) the same price,
+//the two are merged into one: the timeframe is added to the existing level and its label is updated.
+f_add(array<piv> arr, float price, int tim, bool isS1, string stl, int sec, float tol, string base, string n1, string n2, int sc1, int sc2) =>
+    int found = -1
+    if arr.size() > 0
+        for i = 0 to arr.size() - 1
+            if math.abs(arr.get(i).prc - price) <= tol
+                found := i
+                break
+
+    if found >= 0
+        piv p = arr.get(found)
+        p.s1 := p.s1 or isS1
+        p.s2 := p.s2 or not isS1
+        if tim < p.tim
+            p.tim := tim
+            if not na(p.lin)
+                line.set_x1(p.lin, tim)
+        if sec > p.sSec
+            p.sSec := sec
+            p.sty  := stl
+            if not na(p.lin)
+                line.set_style(p.lin, stl)
+        if not na(p.lbl)
+            label.set_text(p.lbl, f_lbl(base, p.s1, p.s2, n1, n2, sc1, sc2))
+
+    if found < 0
+        arr.unshift(piv.new(price, tim, bar_index, false, false, isS1, not isS1, stl, sec))
+    true
+
+//Checks all tracked levels on the current bar.
+//If one candle sweeps several levels, ONLY ONE line is drawn: the highest one for highs, the lowest one for lows.
+//Levels that were invalidated are erased completely (line + label).
+f_scan(array<piv> arr, bool isHigh, string base, string n1, string n2, int sc1, int sc2) =>
+    bool bodyMode = invMode == 'Body'
+    color c = isHigh ? colBr : colBl
+    int best = -1
+    float bestP = na
+
+    //Pass 1: among all levels swept by this candle find the extreme one
+    if arr.size() > 0
+        for i = 0 to arr.size() - 1
+            piv p = arr.get(i)
+            if not p.mit and not p.wic
+                bool swp = isHigh ? (high > p.prc and close < p.prc) : (low < p.prc and close > p.prc)
+                if swp
+                    if best == -1 or (isHigh ? p.prc > bestP : p.prc < bestP)
+                        best := i
+                        bestP := p.prc
+
+    //Pass 2: draw the extreme one, mark the others as swept (no drawing), handle invalidation
+    if arr.size() > 0
+        for i = arr.size() - 1 to 0
+            piv p = arr.get(i)
+
+            if not p.mit
+                bool swp = (not p.wic) and (isHigh ? (high > p.prc and close < p.prc) : (low < p.prc and close > p.prc))
+                bool brk = isHigh ? (bodyMode ? math.max(open, close) > p.prc : close > p.prc) : (bodyMode ? math.min(open, close) < p.prc : close < p.prc)
+
+                if swp
+                    if i == best
+                        p.lin := line.new(p.tim, p.prc, time, p.prc, xloc = xloc.bar_time, color = c, style = p.sty, width = 1)
+                        p.lbl := label.new(time, p.prc, f_lbl(base, p.s1, p.s2, n1, n2, sc1, sc2), xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = c, size = size.small)
+                    p.wic := true
+                else if brk
+                    p.mit := true
+
+            if p.mit or bar_index - p.bix > maxAge
+                arr.remove(i)
+                line.delete(p.lin)
+                label.delete(p.lbl)
+    true
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Calculations
+//---------------------------------------------------------------------------------------------------------------------{
+//Timeframes are built WITHOUT user functions, so they stay "simple string" (required by request.security)
+simple int chartSec = timeframe.in_seconds()
+simple int tfIdx    = chartSec <= 60 ? 0 : chartSec <= 300 ? 1 : chartSec <= 900 ? 2 : chartSec <= 3600 ? 3 : chartSec <= 14400 ? 4 : chartSec <= 86400 ? 5 : chartSec <= 604800 ? 6 : 7
+
+simple int k1 = math.min(tfIdx + 1, 7)
+simple int k2 = math.min(tfIdx + 2, 7)
+simple int k3 = math.min(tfIdx + 3, 7)
+
+simple string x1 = k1 == 0 ? '1' : k1 == 1 ? '5' : k1 == 2 ? '15' : k1 == 3 ? '60' : k1 == 4 ? '240' : k1 == 5 ? '1D' : k1 == 6 ? '1W' : '1M'
+simple string x2 = k2 == 0 ? '1' : k2 == 1 ? '5' : k2 == 2 ? '15' : k2 == 3 ? '60' : k2 == 4 ? '240' : k2 == 5 ? '1D' : k2 == 6 ? '1W' : '1M'
+simple string x3 = k3 == 0 ? '1' : k3 == 1 ? '5' : k3 == 2 ? '15' : k3 == 3 ? '60' : k3 == 4 ? '240' : k3 == 5 ? '1D' : k3 == 6 ? '1W' : '1M'
+
+//Timeframe by mode: Auto = chart timeframe, Select TF = manual, X+1/X+2/X+3 = higher than chart
+simple string tf1p = mode1 == 'Select TF' ? tf1 : mode1 == 'X+1 TF' ? x1 : mode1 == 'X+2 TF' ? x2 : mode1 == 'X+3 TF' ? x3 : timeframe.period
+simple string tf2p = mode2 == 'Select TF' ? tf2 : mode2 == 'X+1 TF' ? x1 : mode2 == 'X+2 TF' ? x2 : mode2 == 'X+3 TF' ? x3 : timeframe.period
+
+//A selected timeframe lower than the chart timeframe falls back to the chart timeframe
+simple string tf1u = timeframe.in_seconds(tf1p) < chartSec ? timeframe.period : tf1p
+simple string tf2u = timeframe.in_seconds(tf2p) < chartSec ? timeframe.period : tf2p
+
+sec1  = timeframe.in_seconds(tf1u)
+sec2  = timeframe.in_seconds(tf2u)
+name1 = f_tfName(tf1u)
+name2 = f_tfName(tf2u)
+
+stl1 = f_style(sty1)
+stl2 = f_style(sty2)
+tol  = mergeTicks * syminfo.mintick
+
+dep1 = f_depth(term1)
+dep2 = f_depth(term2)
+
+//Separate single-value requests instead of a tuple
+ph1   = request.security(syminfo.tickerid, tf1u, f_swings(dep1, 0), lookahead = barmerge.lookahead_on)
+ph1Tf = request.security(syminfo.tickerid, tf1u, f_swings(dep1, 1), lookahead = barmerge.lookahead_on)
+pl1   = request.security(syminfo.tickerid, tf1u, f_swings(dep1, 2), lookahead = barmerge.lookahead_on)
+pl1Tf = request.security(syminfo.tickerid, tf1u, f_swings(dep1, 3), lookahead = barmerge.lookahead_on)
+
+ph2   = request.security(syminfo.tickerid, tf2u, f_swings(dep2, 0), lookahead = barmerge.lookahead_on)
+ph2Tf = request.security(syminfo.tickerid, tf2u, f_swings(dep2, 1), lookahead = barmerge.lookahead_on)
+pl2   = request.security(syminfo.tickerid, tf2u, f_swings(dep2, 2), lookahead = barmerge.lookahead_on)
+pl2Tf = request.security(syminfo.tickerid, tf2u, f_swings(dep2, 3), lookahead = barmerge.lookahead_on)
+
+int ph1T = na(ph1Tf) ? na : int(ph1Tf)
+int pl1T = na(pl1Tf) ? na : int(pl1Tf)
+int ph2T = na(ph2Tf) ? na : int(ph2Tf)
+int pl2T = na(pl2Tf) ? na : int(pl2Tf)
+
+//New swing detection (must be evaluated on every bar because of the history reference)
+newH1 = show1 and not na(ph1) and ph1T != nz(ph1T[1])
+newL1 = show1 and not na(pl1) and pl1T != nz(pl1T[1])
+newH2 = show2 and not na(ph2) and ph2T != nz(ph2T[1])
+newL2 = show2 and not na(pl2) and pl2T != nz(pl2T[1])
+
+//One shared list of levels for both timeframes (needed for merging and for "one line per candle")
+var array<piv> aPivH = array.new<piv>()
+var array<piv> aPivL = array.new<piv>()
+
+//Work on confirmed chart bars only (no flicker / repaint on the live candle)
+if barstate.isconfirmed
+    if newH1
+        f_add(aPivH, ph1, ph1T, true, stl1, sec1, tol, labelTxt, name1, name2, sec1, sec2)
+    if newL1
+        f_add(aPivL, pl1, pl1T, true, stl1, sec1, tol, labelTxt, name1, name2, sec1, sec2)
+    if newH2
+        f_add(aPivH, ph2, ph2T, false, stl2, sec2, tol, labelTxt, name1, name2, sec1, sec2)
+    if newL2
+        f_add(aPivL, pl2, pl2T, false, stl2, sec2, tol, labelTxt, name1, name2, sec1, sec2)
+
+    f_scan(aPivH, true,  labelTxt, name1, name2, sec1, sec2)
+    f_scan(aPivL, false, labelTxt, name1, name2, sec1, sec2)
+
+//---------------------------------------------------------------------------------------------------------------------}
